@@ -1192,6 +1192,16 @@ func (v *Viper) MustBindEnv(input ...string) {
 //
 // Note: this assumes a lower-cased key given.
 func (v *Viper) find(lcaseKey string, flagDefault bool) any {
+	val, _ := v.findWithSource(lcaseKey, flagDefault)
+	return val
+}
+
+// findWithSource is find's workhorse: it resolves the value for lcaseKey
+// walking the precedence chain (override, flag, env, config, kvstore,
+// default, flag default) and also reports which layer supplied it.
+//
+// Note: this assumes a lower-cased key given.
+func (v *Viper) findWithSource(lcaseKey string, flagDefault bool) (any, Source) {
 	var (
 		val    any
 		exists bool
@@ -1201,7 +1211,7 @@ func (v *Viper) find(lcaseKey string, flagDefault bool) any {
 
 	// compute the path through the nested maps to the nested value
 	if nested && v.isPathShadowedInDeepMap(path, castMapStringToMapInterface(v.aliases)) != "" {
-		return nil
+		return nil, SourceNone
 	}
 
 	// if the requested key is an alias, then return the proper key
@@ -1212,60 +1222,19 @@ func (v *Viper) find(lcaseKey string, flagDefault bool) any {
 	// Set() override first
 	val = v.searchMap(v.override, path)
 	if val != nil {
-		return val
+		return val, SourceOverride
 	}
 	if nested && v.isPathShadowedInDeepMap(path, v.override) != "" {
-		return nil
+		return nil, SourceNone
 	}
 
 	// PFlag override next
 	flag, exists := v.pflags[lcaseKey]
 	if exists && flag.HasChanged() {
-		switch flag.ValueType() {
-		case "int", "int8", "int16", "int32", "int64":
-			return cast.ToInt(flag.ValueString())
-		case "bool":
-			return cast.ToBool(flag.ValueString())
-		case "stringSlice", "stringArray":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return res
-		case "boolSlice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return cast.ToBoolSlice(res)
-		case "intSlice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return cast.ToIntSlice(res)
-		case "uintSlice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return cast.ToUintSlice(res)
-		case "float64Slice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return cast.ToFloat64Slice(res)
-		case "durationSlice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			slice := strings.Split(s, ",")
-			return cast.ToDurationSlice(slice)
-		case "stringToString":
-			return stringToStringConv(flag.ValueString())
-		case "stringToInt":
-			return stringToIntConv(flag.ValueString())
-		default:
-			return flag.ValueString()
-		}
+		return flagToValue(flag), SourceFlag
 	}
 	if nested && v.isPathShadowedInFlatMap(path, v.pflags) != "" {
-		return nil
+		return nil, SourceNone
 	}
 
 	// Env override next
@@ -1274,102 +1243,109 @@ func (v *Viper) find(lcaseKey string, flagDefault bool) any {
 		// even if it hasn't been registered, if automaticEnv is used,
 		// check any Get request
 		if val, ok := v.getEnv(v.mergeWithEnvPrefix(envKey)); ok {
-			return val
+			return val, SourceEnv
 		}
 		if nested && v.isPathShadowedInAutoEnv(path) != "" {
-			return nil
+			return nil, SourceNone
 		}
 	}
 	envkeys, exists := v.env[lcaseKey]
 	if exists {
 		for _, envkey := range envkeys {
 			if val, ok := v.getEnv(envkey); ok {
-				return val
+				return val, SourceEnv
 			}
 		}
 	}
 	if nested && v.isPathShadowedInFlatMap(path, v.env) != "" {
-		return nil
+		return nil, SourceNone
 	}
 
 	// Config file next
 	val = v.searchIndexableWithPathPrefixes(v.config, path)
 	if val != nil {
-		return val
+		return val, SourceConfig
 	}
 	if nested && v.isPathShadowedInDeepMap(path, v.config) != "" {
-		return nil
+		return nil, SourceNone
 	}
 
 	// K/V store next
 	val = v.searchMap(v.kvstore, path)
 	if val != nil {
-		return val
+		return val, SourceKVStore
 	}
 	if nested && v.isPathShadowedInDeepMap(path, v.kvstore) != "" {
-		return nil
+		return nil, SourceNone
 	}
 
 	// Default next
 	val = v.searchMap(v.defaults, path)
 	if val != nil {
-		return val
+		return val, SourceDefault
 	}
 	if nested && v.isPathShadowedInDeepMap(path, v.defaults) != "" {
-		return nil
+		return nil, SourceNone
 	}
 
 	if flagDefault {
 		// last chance: if no value is found and a flag does exist for the key,
 		// get the flag's default value even if the flag's value has not been set.
 		if flag, exists := v.pflags[lcaseKey]; exists {
-			switch flag.ValueType() {
-			case "int", "int8", "int16", "int32", "int64":
-				return cast.ToInt(flag.ValueString())
-			case "bool":
-				return cast.ToBool(flag.ValueString())
-			case "stringSlice", "stringArray":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return res
-			case "boolSlice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return cast.ToBoolSlice(res)
-			case "intSlice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return cast.ToIntSlice(res)
-			case "uintSlice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return cast.ToUintSlice(res)
-			case "float64Slice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				res, _ := readAsCSV(s)
-				return cast.ToFloat64Slice(res)
-			case "stringToString":
-				return stringToStringConv(flag.ValueString())
-			case "stringToInt":
-				return stringToIntConv(flag.ValueString())
-			case "durationSlice":
-				s := strings.TrimPrefix(flag.ValueString(), "[")
-				s = strings.TrimSuffix(s, "]")
-				slice := strings.Split(s, ",")
-				return cast.ToDurationSlice(slice)
-			default:
-				return flag.ValueString()
-			}
+			return flagToValue(flag), SourceFlagDefault
 		}
 		// last item, no need to check shadowing
 	}
 
-	return nil
+	return nil, SourceNone
+}
+
+// flagToValue converts a bound flag's string value to its typed value.
+// It is shared by the changed-flag and flag-default lookups so both
+// paths stay consistent.
+func flagToValue(flag FlagValue) any {
+	switch flag.ValueType() {
+	case "int", "int8", "int16", "int32", "int64":
+		return cast.ToInt(flag.ValueString())
+	case "bool":
+		return cast.ToBool(flag.ValueString())
+	case "stringSlice", "stringArray":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return res
+	case "boolSlice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return cast.ToBoolSlice(res)
+	case "intSlice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return cast.ToIntSlice(res)
+	case "uintSlice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return cast.ToUintSlice(res)
+	case "float64Slice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return cast.ToFloat64Slice(res)
+	case "durationSlice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		slice := strings.Split(s, ",")
+		return cast.ToDurationSlice(slice)
+	case "stringToString":
+		return stringToStringConv(flag.ValueString())
+	case "stringToInt":
+		return stringToIntConv(flag.ValueString())
+	default:
+		return flag.ValueString()
+	}
 }
 
 func readAsCSV(val string) ([]string, error) {

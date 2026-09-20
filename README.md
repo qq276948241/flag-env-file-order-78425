@@ -81,6 +81,9 @@ Viper uses the following precedence for merging:
  * external key/value stores
  * defaults
 
+Use `GetSource(key)` to find out which of these layers supplied the final
+value for a key — handy when debugging why a value is (not) what you expect.
+
 > **NOTE** Viper configuration keys are case insensitive.
 
 ### Reading Config Files
